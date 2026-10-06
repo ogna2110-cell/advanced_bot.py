@@ -27,4 +27,4 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          python Advanced/advanced_bot.py
+          python advanced_bot.py
