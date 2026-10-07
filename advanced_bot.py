@@ -5,9 +5,12 @@ import pandas as pd
 import numpy as np
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = "5446314741"
 
-# Broker spread varsayımı: 13 pip
+# SADECE BU CHAT ID'YE MESAJ GÖNDERİLİR
+AUTHORIZED_CHAT_ID = "5446314741"
+CHAT_ID = AUTHORIZED_CHAT_ID
+
+# Broker spread varsayımı
 SPREAD_PIPS = 13.0
 SPREAD = SPREAD_PIPS * 0.0001
 
@@ -74,9 +77,7 @@ def get_4h_data():
         "close": "last"
     })
 
-    df = df.dropna().reset_index()
-
-    return df
+    return df.dropna().reset_index()
 
 
 # =========================
@@ -87,20 +88,10 @@ def indicators(df):
 
     df = df.copy()
 
-    df["EMA20"] = df["close"].ewm(
-        span=20,
-        adjust=False
-    ).mean()
-
-    df["EMA50"] = df["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    df["EMA200"] = df["close"].ewm(
-        span=200,
-        adjust=False
-    ).mean()
+    # EMA
+    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["EMA200"] = df["close"].ewm(span=200, adjust=False).mean()
 
     # RSI
     delta = df["close"].diff()
@@ -123,15 +114,8 @@ def indicators(df):
     df["RSI"] = 100 - (100 / (1 + rs))
 
     # MACD
-    ema12 = df["close"].ewm(
-        span=12,
-        adjust=False
-    ).mean()
-
-    ema26 = df["close"].ewm(
-        span=26,
-        adjust=False
-    ).mean()
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
 
     df["MACD"] = ema12 - ema26
 
@@ -165,7 +149,7 @@ def indicators(df):
 
 
 # =========================
-# ZAMAN DİLİMİ
+# ZAMAN DİLİMİ ANALİZİ
 # =========================
 
 def analyze(df):
@@ -248,98 +232,180 @@ def create_analysis():
 
     price = a15["close"]
 
-    # Yahoo yaklaşık piyasa fiyatı kabul edilir.
     ask = price + SPREAD / 2
     bid = price - SPREAD / 2
 
     support, resistance = support_resistance(df15)
 
-    # =========================
-    # SKOR
-    # =========================
-
     buy = 0
     sell = 0
 
-    # 4H = 2 puan
+    # =========================
+    # TREND
+    # =========================
+
     if a4h["trend"] == "BULLISH":
         buy += 2
     elif a4h["trend"] == "BEARISH":
         sell += 2
 
-    # 1H = 2 puan
     if a1h["trend"] == "BULLISH":
         buy += 2
     elif a1h["trend"] == "BEARISH":
         sell += 2
 
-    # 15M = 2 puan
     if a15["trend"] == "BULLISH":
         buy += 2
     elif a15["trend"] == "BEARISH":
         sell += 2
 
-    # RSI = 1 puan
+    # =========================
+    # RSI
+    # =========================
+
     if 52 <= a15["rsi"] <= 68:
         buy += 1
 
     elif 32 <= a15["rsi"] <= 48:
         sell += 1
 
-    # MACD = 1 puan
+    # =========================
+    # MACD
+    # =========================
+
     if a15["macd_hist"] > 0:
         buy += 1
 
     elif a15["macd_hist"] < 0:
         sell += 1
 
-    # Momentum = 1 puan
+    # =========================
+    # 1H MOMENTUM
+    # =========================
+
     if a1h["close"] > a1h["ema20"]:
         buy += 1
 
     elif a1h["close"] < a1h["ema20"]:
         sell += 1
 
-    # Destek/direnç = 1 puan
-    if price > support and price < resistance:
-
-        support_distance = price - support
-        resistance_distance = resistance - price
-
-        if support_distance > resistance_distance:
-            sell += 1
-        else:
-            buy += 1
-
     # =========================
-    # SİNYAL
+    # DESTEK / DİRENÇ
     # =========================
 
-    if buy >= 8 and buy > sell:
-        signal = "BUY"
+    support_distance = price - support
+    resistance_distance = resistance - price
+
+    if support_distance > resistance_distance:
+        sell += 1
+    else:
+        buy += 1
+
+    # =========================
+    # YÖN
+    # =========================
+
+    if buy > sell:
+        direction = "BUY"
         score = buy
 
-    elif sell >= 8 and sell > buy:
-        signal = "SELL"
+    elif sell > buy:
+        direction = "SELL"
         score = sell
 
     else:
-        signal = "WAIT"
+        direction = "WAIT"
         score = max(buy, sell)
 
     # =========================
-    # ENTRY / SL / TP
+    # GİRİŞ KALİTESİ
     # =========================
 
+    reasons = []
+
+    # Aşırı alım / satım kontrolü
+    oversold = a15["rsi"] < 30
+    overbought = a15["rsi"] > 70
+
+    # Kısa vadeli momentum
+    bullish_momentum = (
+        a15["macd_hist"] > 0
+        and a15["close"] > a15["ema20"]
+    )
+
+    bearish_momentum = (
+        a15["macd_hist"] < 0
+        and a15["close"] < a15["ema20"]
+    )
+
+    # Trend hizalanması
+    all_bullish = (
+        a4h["trend"] == "BULLISH"
+        and a1h["trend"] == "BULLISH"
+        and a15["trend"] == "BULLISH"
+    )
+
+    all_bearish = (
+        a4h["trend"] == "BEARISH"
+        and a1h["trend"] == "BEARISH"
+        and a15["trend"] == "BEARISH"
+    )
+
+    # =========================
+    # TRADE PLAN
+    # =========================
+
+    signal = "WAIT"
+
     entry = None
+    entry_low = None
+    entry_high = None
+
     sl = None
     tp1 = None
     tp2 = None
     tp3 = None
 
+    invalidation = None
+    risk = None
+    rr1 = None
+
+    if direction == "BUY" and score >= 8:
+
+        if overbought:
+            reasons.append("15M RSI aşırı alım bölgesinde.")
+        elif not bullish_momentum:
+            reasons.append("15M momentum henüz yeterince güçlü değil.")
+        elif not all_bullish:
+            reasons.append("Üç zaman dilimi tam hizalanmış değil.")
+        else:
+            signal = "BUY"
+
+    elif direction == "SELL" and score >= 8:
+
+        if oversold:
+            reasons.append("15M RSI aşırı satım bölgesinde.")
+        elif not bearish_momentum:
+            reasons.append("15M momentum henüz yeterince güçlü değil.")
+        elif not all_bearish:
+            reasons.append("Üç zaman dilimi tam hizalanmış değil.")
+        else:
+            signal = "SELL"
+
+    else:
+        reasons.append("Skor güçlü işlem için yeterli değil.")
+
+    # =========================
+    # BUY PLAN
+    # =========================
+
     if signal == "BUY":
 
         entry = ask
+
+        # Entry zone: mevcut fiyat çevresinde
+        entry_low = ask
+        entry_high = ask + (a15["atr"] * 0.20)
 
         stop_distance = max(
             a15["atr"] * 1.5,
@@ -352,9 +418,21 @@ def create_analysis():
         tp2 = entry + stop_distance * 2
         tp3 = entry + stop_distance * 3
 
+        invalidation = sl
+
+        risk = entry - sl
+        rr1 = (tp1 - entry) / risk
+
+    # =========================
+    # SELL PLAN
+    # =========================
+
     elif signal == "SELL":
 
         entry = bid
+
+        entry_low = bid - (a15["atr"] * 0.20)
+        entry_high = bid
 
         stop_distance = max(
             a15["atr"] * 1.5,
@@ -367,8 +445,14 @@ def create_analysis():
         tp2 = entry - stop_distance * 2
         tp3 = entry - stop_distance * 3
 
+        invalidation = sl
+
+        risk = sl - entry
+        rr1 = (entry - tp1) / risk
+
     return {
         "signal": signal,
+        "direction": direction,
         "score": score,
         "price": price,
         "ask": ask,
@@ -376,20 +460,26 @@ def create_analysis():
         "support": support,
         "resistance": resistance,
         "entry": entry,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
+        "invalidation": invalidation,
+        "risk": risk,
+        "rr1": rr1,
         "a15": a15,
         "a1h": a1h,
         "a4h": a4h,
         "buy": buy,
-        "sell": sell
+        "sell": sell,
+        "reasons": reasons
     }
 
 
 # =========================
-# MESAJ
+# FORMAT
 # =========================
 
 def p(value):
@@ -399,6 +489,10 @@ def p(value):
 
     return f"{value:.5f}"
 
+
+# =========================
+# MESAJ
+# =========================
 
 def make_message(a):
 
@@ -430,7 +524,7 @@ Price: {p(a["price"])}
 Estimated Ask: {p(a["ask"])}
 Estimated Bid: {p(a["bid"])}
 
-Broker spread assumption:
+Spread assumption:
 ~{SPREAD_PIPS:.0f} pips
 
 ━━━━━━━━━━━━━━
@@ -445,6 +539,7 @@ EMA50: {p(x15["ema50"])}
 EMA200: {p(x15["ema200"])}
 
 MACD: {x15["macd"]:.6f}
+MACD Signal: {x15["macd_signal"]:.6f}
 MACD Histogram: {x15["macd_hist"]:.6f}
 
 ATR: {x15["atr"]:.5f}
@@ -487,13 +582,16 @@ BUY SCORE: {a["buy"]}/10
 SELL SCORE: {a["sell"]}/10
 """
 
-    if a["signal"] != "WAIT":
+    if a["signal"] in ["BUY", "SELL"]:
 
         msg += f"""
 
 ━━━━━━━━━━━━━━
 
 TRADE PLAN
+
+ENTRY ZONE:
+{p(a["entry_low"])} - {p(a["entry_high"])}
 
 ENTRY:
 {p(a["entry"])}
@@ -510,20 +608,36 @@ TP2:
 TP3:
 {p(a["tp3"])}
 
+R/R TO TP1:
+1:{a["rr1"]:.2f}
+
+INVALIDATION:
+{p(a["invalidation"])}
+
 ━━━━━━━━━━━━━━
 
 ACTION
 
-{a["signal"]} yönü daha güçlü görünüyor.
+{a["signal"]} setup onaylandı.
 
-Önce demo hesapta test et.
+Trend + momentum + zaman dilimi
+uyumu yeterli seviyede.
 
-Score bir kazanma garantisi değildir.
+Demo hesapta test et.
+
+Score kazanma garantisi değildir.
 """
 
     else:
 
-        msg += """
+        reason_text = ""
+
+        if a["reasons"]:
+            reason_text = "\n".join(
+                f"• {r}" for r in a["reasons"]
+            )
+
+        msg += f"""
 
 ━━━━━━━━━━━━━━
 
@@ -531,17 +645,19 @@ ACTION
 
 🟡 WAIT
 
-Şu anda güçlü bir işlem sinyali yok.
-
-BUY ve SELL koşulları yeterince
-güçlü şekilde aynı yönde birleşmiyor.
-
 İşlem açma.
-Daha iyi hizalanma bekle.
+
+Neden:
+{reason_text}
+
+Daha iyi giriş ve momentum
+uyumu bekleniyor.
 
 ━━━━━━━━━━━━━━
 
 Demo hesapta test et.
+
+Score kazanma garantisi değildir.
 """
 
     return msg
@@ -553,12 +669,16 @@ Demo hesapta test et.
 
 def send_message(text):
 
+    # Güvenlik: sadece sabit yetkili Chat ID
+    if CHAT_ID != AUTHORIZED_CHAT_ID:
+        raise Exception("Unauthorized Chat ID")
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     response = requests.post(
         url,
         data={
-            "chat_id": CHAT_ID,
+            "chat_id": AUTHORIZED_CHAT_ID,
             "text": text
         },
         timeout=20
