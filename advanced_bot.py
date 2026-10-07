@@ -4,62 +4,50 @@ import requests
 import pandas as pd
 import numpy as np
 
-# =========================
-# TELEGRAM AYARLARI
-# =========================
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ALLOWED_CHAT_ID = "5446314741"
+CHAT_ID = "5446314741"
 
-# Broker spread varsayımı
+# Broker spread varsayımı: 13 pip
 SPREAD_PIPS = 13.0
-SPREAD_PRICE = SPREAD_PIPS * 0.0001
+SPREAD = SPREAD_PIPS * 0.0001
 
 
 # =========================
-# YAHOO FINANCE VERİSİ
+# YAHOO VERİSİ
 # =========================
 
-def get_yahoo_data(interval="15m", range_="5d"):
+def get_data(interval, range_):
     urls = [
         f"https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval={interval}&range={range_}",
         f"https://query2.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval={interval}&range={range_}"
     ]
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in urls:
         try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=20
-            )
+            r = requests.get(url, headers=headers, timeout=20)
 
-            if response.status_code != 200:
+            if r.status_code != 200:
                 continue
 
-            data = response.json()
+            data = r.json()
             result = data["chart"]["result"]
 
             if not result:
                 continue
 
-            timestamps = result[0]["timestamp"]
-            quote = result[0]["indicators"]["quote"][0]
+            result = result[0]
 
             df = pd.DataFrame({
-                "timestamp": pd.to_datetime(timestamps, unit="s"),
-                "open": quote["open"],
-                "high": quote["high"],
-                "low": quote["low"],
-                "close": quote["close"],
-                "volume": quote.get("volume", [0] * len(timestamps))
+                "time": pd.to_datetime(result["timestamp"], unit="s"),
+                "open": result["indicators"]["quote"][0]["open"],
+                "high": result["indicators"]["quote"][0]["high"],
+                "low": result["indicators"]["quote"][0]["low"],
+                "close": result["indicators"]["quote"][0]["close"]
             })
 
-            df = df.dropna(subset=["open", "high", "low", "close"])
+            df = df.dropna()
 
             if len(df) >= 50:
                 return df
@@ -67,25 +55,23 @@ def get_yahoo_data(interval="15m", range_="5d"):
         except Exception:
             time.sleep(1)
 
-    raise Exception(f"EUR/USD {interval} verisi alınamadı.")
+    raise Exception(f"{interval} verisi alınamadı.")
 
 
 # =========================
-# 4 SAATLİK VERİ OLUŞTUR
+# 4H VERİSİ
 # =========================
 
 def get_4h_data():
-    df = get_yahoo_data("1h", "3mo")
+    df = get_data("1h", "3mo")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp")
+    df = df.set_index("time")
 
     df = df.resample("4h").agg({
         "open": "first",
         "high": "max",
         "low": "min",
-        "close": "last",
-        "volume": "sum"
+        "close": "last"
     })
 
     df = df.dropna().reset_index()
@@ -94,36 +80,41 @@ def get_4h_data():
 
 
 # =========================
-# EMA
+# İNDİKATÖRLER
 # =========================
 
-def add_ema(df, period):
-    df[f"EMA{period}"] = df["close"].ewm(
-        span=period,
+def indicators(df):
+
+    df = df.copy()
+
+    df["EMA20"] = df["close"].ewm(
+        span=20,
         adjust=False
     ).mean()
 
-    return df
+    df["EMA50"] = df["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
+    df["EMA200"] = df["close"].ewm(
+        span=200,
+        adjust=False
+    ).mean()
 
-# =========================
-# RSI
-# =========================
-
-def add_rsi(df, period=14):
-
+    # RSI
     delta = df["close"].diff()
 
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
-        alpha=1 / period,
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
     avg_loss = loss.ewm(
-        alpha=1 / period,
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
@@ -131,15 +122,7 @@ def add_rsi(df, period=14):
 
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    return df
-
-
-# =========================
-# MACD
-# =========================
-
-def add_macd(df):
-
+    # MACD
     ema12 = df["close"].ewm(
         span=12,
         adjust=False
@@ -161,28 +144,20 @@ def add_macd(df):
         df["MACD"] - df["MACD_SIGNAL"]
     )
 
-    return df
-
-
-# =========================
-# ATR
-# =========================
-
-def add_atr(df, period=14):
-
+    # ATR
     previous_close = df["close"].shift(1)
 
     tr1 = df["high"] - df["low"]
     tr2 = abs(df["high"] - previous_close)
     tr3 = abs(df["low"] - previous_close)
 
-    true_range = pd.concat(
+    tr = pd.concat(
         [tr1, tr2, tr3],
         axis=1
     ).max(axis=1)
 
-    df["ATR"] = true_range.ewm(
-        alpha=1 / period,
+    df["ATR"] = tr.ewm(
+        alpha=1 / 14,
         adjust=False
     ).mean()
 
@@ -190,92 +165,39 @@ def add_atr(df, period=14):
 
 
 # =========================
-# TÜM İNDİKATÖRLER
+# ZAMAN DİLİMİ
 # =========================
 
-def prepare_dataframe(df):
+def analyze(df):
 
-    for period in [20, 50, 200]:
-        df = add_ema(df, period)
+    df = indicators(df)
 
-    df = add_rsi(df)
-    df = add_macd(df)
-    df = add_atr(df)
+    x = df.iloc[-1]
 
-    return df
+    close = float(x["close"])
+    ema20 = float(x["EMA20"])
+    ema50 = float(x["EMA50"])
+    ema200 = float(x["EMA200"])
+    rsi = float(x["RSI"])
+    macd = float(x["MACD"])
+    macd_signal = float(x["MACD_SIGNAL"])
+    macd_hist = float(x["MACD_HIST"])
+    atr = float(x["ATR"])
 
+    if close > ema20 and ema20 > ema50 and ema50 > ema200:
+        trend = "BULLISH"
 
-# =========================
-# DESTEK / DİRENÇ
-# =========================
+    elif close < ema20 and ema20 < ema50 and ema50 < ema200:
+        trend = "BEARISH"
 
-def find_support_resistance(df, lookback=80):
+    elif close > ema200:
+        trend = "BULLISH"
 
-    recent = df.tail(lookback)
+    elif close < ema200:
+        trend = "BEARISH"
 
-    support = recent["low"].min()
-    resistance = recent["high"].max()
-
-    return support, resistance
-
-
-# =========================
-# ZAMAN DİLİMİ ANALİZİ
-# =========================
-
-def analyze_timeframe(df):
-
-    df = prepare_dataframe(df)
-
-    last = df.iloc[-1]
-
-    close = float(last["close"])
-    ema20 = float(last["EMA20"])
-    ema50 = float(last["EMA50"])
-    ema200 = float(last["EMA200"])
-    rsi = float(last["RSI"])
-    macd = float(last["MACD"])
-    macd_signal = float(last["MACD_SIGNAL"])
-    macd_hist = float(last["MACD_HIST"])
-    atr = float(last["ATR"])
-
-    bullish = 0
-    bearish = 0
-
-    # EMA trend
-    if close > ema20:
-        bullish += 1
     else:
-        bearish += 1
-
-    if ema20 > ema50:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if ema50 > ema200:
-        bullish += 1
-    else:
-        bearish += 1
-
-    # RSI
-    if rsi > 50:
-        bullish += 1
-    elif rsi < 50:
-        bearish += 1
-
-    # MACD
-    if macd > macd_signal and macd_hist > 0:
-        bullish += 1
-    elif macd < macd_signal and macd_hist < 0:
-        bearish += 1
-
-    if bullish > bearish:
-        direction = "BULLISH"
-    elif bearish > bullish:
-        direction = "BEARISH"
-    else:
-        direction = "NEUTRAL"
+        trend = "NEUTRAL"
 
     return {
         "close": close,
@@ -287,179 +209,170 @@ def analyze_timeframe(df):
         "macd_signal": macd_signal,
         "macd_hist": macd_hist,
         "atr": atr,
-        "bullish": bullish,
-        "bearish": bearish,
-        "direction": direction
+        "trend": trend
     }
 
 
 # =========================
-# ANA SİNYAL ANALİZİ
+# DESTEK / DİRENÇ
 # =========================
 
-def generate_signal():
+def support_resistance(df):
 
-    df15 = get_yahoo_data("15m", "5d")
-    df1h = get_yahoo_data("1h", "1mo")
+    recent = df.tail(80)
+
+    support = float(recent["low"].min())
+    resistance = float(recent["high"].max())
+
+    return support, resistance
+
+
+# =========================
+# ANA ANALİZ
+# =========================
+
+def create_analysis():
+
+    print("15M verisi alınıyor...")
+    df15 = get_data("15m", "5d")
+
+    print("1H verisi alınıyor...")
+    df1h = get_data("1h", "1mo")
+
+    print("4H verisi alınıyor...")
     df4h = get_4h_data()
 
-    a15 = analyze_timeframe(df15)
-    a1h = analyze_timeframe(df1h)
-    a4h = analyze_timeframe(df4h)
+    a15 = analyze(df15)
+    a1h = analyze(df1h)
+    a4h = analyze(df4h)
 
-    current_price = a15["close"]
+    price = a15["close"]
 
-    # Yahoo fiyatı mid/last gibi düşünülür.
-    assumed_ask = current_price + SPREAD_PRICE / 2
-    assumed_bid = current_price - SPREAD_PRICE / 2
+    # Yahoo yaklaşık piyasa fiyatı kabul edilir.
+    ask = price + SPREAD / 2
+    bid = price - SPREAD / 2
 
-    support, resistance = find_support_resistance(
-        df15,
-        80
-    )
+    support, resistance = support_resistance(df15)
 
     # =========================
     # SKOR
     # =========================
 
-    buy_score = 0
-    sell_score = 0
+    buy = 0
+    sell = 0
 
-    # 4H trend
-    if a4h["direction"] == "BULLISH":
-        buy_score += 2
-    elif a4h["direction"] == "BEARISH":
-        sell_score += 2
+    # 4H = 2 puan
+    if a4h["trend"] == "BULLISH":
+        buy += 2
+    elif a4h["trend"] == "BEARISH":
+        sell += 2
 
-    # 1H trend
-    if a1h["direction"] == "BULLISH":
-        buy_score += 2
-    elif a1h["direction"] == "BEARISH":
-        sell_score += 2
+    # 1H = 2 puan
+    if a1h["trend"] == "BULLISH":
+        buy += 2
+    elif a1h["trend"] == "BEARISH":
+        sell += 2
 
-    # 15M trend
-    if a15["direction"] == "BULLISH":
-        buy_score += 2
-    elif a15["direction"] == "BEARISH":
-        sell_score += 2
+    # 15M = 2 puan
+    if a15["trend"] == "BULLISH":
+        buy += 2
+    elif a15["trend"] == "BEARISH":
+        sell += 2
 
-    # RSI
+    # RSI = 1 puan
     if 52 <= a15["rsi"] <= 68:
-        buy_score += 1
+        buy += 1
 
-    if 32 <= a15["rsi"] <= 48:
-        sell_score += 1
+    elif 32 <= a15["rsi"] <= 48:
+        sell += 1
 
-    # MACD
+    # MACD = 1 puan
     if a15["macd_hist"] > 0:
-        buy_score += 1
+        buy += 1
 
     elif a15["macd_hist"] < 0:
-        sell_score += 1
+        sell += 1
 
-    # Momentum
+    # Momentum = 1 puan
     if a1h["close"] > a1h["ema20"]:
-        buy_score += 1
+        buy += 1
 
     elif a1h["close"] < a1h["ema20"]:
-        sell_score += 1
+        sell += 1
+
+    # Destek/direnç = 1 puan
+    if price > support and price < resistance:
+
+        support_distance = price - support
+        resistance_distance = resistance - price
+
+        if support_distance > resistance_distance:
+            sell += 1
+        else:
+            buy += 1
 
     # =========================
-    # YÖN
+    # SİNYAL
     # =========================
 
-    if buy_score >= 8 and buy_score > sell_score:
+    if buy >= 8 and buy > sell:
         signal = "BUY"
+        score = buy
 
-    elif sell_score >= 8 and sell_score > buy_score:
+    elif sell >= 8 and sell > buy:
         signal = "SELL"
+        score = sell
 
     else:
         signal = "WAIT"
+        score = max(buy, sell)
 
     # =========================
-    # GİRİŞ / SL / TP
+    # ENTRY / SL / TP
     # =========================
+
+    entry = None
+    sl = None
+    tp1 = None
+    tp2 = None
+    tp3 = None
 
     if signal == "BUY":
 
-        entry = assumed_ask
-
-        atr = a15["atr"]
+        entry = ask
 
         stop_distance = max(
-            atr * 1.5,
-            SPREAD_PRICE * 1.5
+            a15["atr"] * 1.5,
+            SPREAD * 1.5
         )
 
         sl = entry - stop_distance
 
         tp1 = entry + stop_distance * 1.5
-        tp2 = entry + stop_distance * 2.0
-        tp3 = entry + stop_distance * 3.0
-
-        # Direnç çok yakınsa TP'leri aşırı zorlamama
-        if resistance > entry and resistance < tp1:
-            tp1 = resistance - 0.00010
-
-        action = (
-            "BUY açılabilir. "
-            "Ancak işlem demo hesapta test edilmeli."
-        )
-
-        score = buy_score
+        tp2 = entry + stop_distance * 2
+        tp3 = entry + stop_distance * 3
 
     elif signal == "SELL":
 
-        entry = assumed_bid
-
-        atr = a15["atr"]
+        entry = bid
 
         stop_distance = max(
-            atr * 1.5,
-            SPREAD_PRICE * 1.5
+            a15["atr"] * 1.5,
+            SPREAD * 1.5
         )
 
         sl = entry + stop_distance
 
         tp1 = entry - stop_distance * 1.5
-        tp2 = entry - stop_distance * 2.0
-        tp3 = entry - stop_distance * 3.0
-
-        if support < entry and support > tp1:
-            tp1 = support + 0.00010
-
-        action = (
-            "SELL açılabilir. "
-            "Ancak işlem demo hesapta test edilmeli."
-        )
-
-        score = sell_score
-
-    else:
-
-        entry = current_price
-        sl = None
-        tp1 = None
-        tp2 = None
-        tp3 = None
-        action = (
-            "ŞU ANDA İŞLEM AÇMA. "
-            "Zaman dilimleri yeterince güçlü şekilde "
-            "aynı yönde değil."
-        )
-
-        score = max(
-            buy_score,
-            sell_score
-        )
+        tp2 = entry - stop_distance * 2
+        tp3 = entry - stop_distance * 3
 
     return {
         "signal": signal,
         "score": score,
-        "price": current_price,
-        "ask": assumed_ask,
-        "bid": assumed_bid,
+        "price": price,
+        "ask": ask,
+        "bid": bid,
         "support": support,
         "resistance": resistance,
         "entry": entry,
@@ -467,18 +380,19 @@ def generate_signal():
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
-        "action": action,
         "a15": a15,
         "a1h": a1h,
-        "a4h": a4h
+        "a4h": a4h,
+        "buy": buy,
+        "sell": sell
     }
 
 
 # =========================
-# TELEGRAM MESAJI
+# MESAJ
 # =========================
 
-def format_price(value):
+def p(value):
 
     if value is None:
         return "-"
@@ -486,152 +400,167 @@ def format_price(value):
     return f"{value:.5f}"
 
 
-def create_message(result):
+def make_message(a):
 
-    signal = result["signal"]
-
-    if signal == "BUY":
+    if a["signal"] == "BUY":
         emoji = "🟢"
-    elif signal == "SELL":
+
+    elif a["signal"] == "SELL":
         emoji = "🔴"
+
     else:
         emoji = "🟡"
 
-    a15 = result["a15"]
-    a1h = result["a1h"]
-    a4h = result["a4h"]
+    x15 = a["a15"]
+    x1h = a["a1h"]
+    x4h = a["a4h"]
 
-    message = f"""
+    msg = f"""
 EUR/USD ADVANCED SIGNAL
 
-{emoji} {signal}
+{emoji} {a["signal"]}
 
-Score: {result["score"]}/10
+Strength Score: {a["score"]}/10
 
-Current price:
-{format_price(result["price"])}
+━━━━━━━━━━━━━━
 
-Estimated spread:
+CURRENT PRICE
+
+Price: {p(a["price"])}
+Estimated Ask: {p(a["ask"])}
+Estimated Bid: {p(a["bid"])}
+
+Broker spread assumption:
 ~{SPREAD_PIPS:.0f} pips
 
-Assumed Ask:
-{format_price(result["ask"])}
+━━━━━━━━━━━━━━
 
-Assumed Bid:
-{format_price(result["bid"])}
+15 MINUTE
+
+Trend: {x15["trend"]}
+RSI: {x15["rsi"]:.1f}
+
+EMA20: {p(x15["ema20"])}
+EMA50: {p(x15["ema50"])}
+EMA200: {p(x15["ema200"])}
+
+MACD: {x15["macd"]:.6f}
+MACD Histogram: {x15["macd_hist"]:.6f}
+
+ATR: {x15["atr"]:.5f}
 
 ━━━━━━━━━━━━━━
 
-15M
-Trend: {a15["direction"]}
-RSI: {a15["rsi"]:.1f}
-EMA20: {format_price(a15["ema20"])}
-EMA50: {format_price(a15["ema50"])}
-EMA200: {format_price(a15["ema200"])}
-MACD: {a15["macd"]:.6f}
+1 HOUR
 
-1H
-Trend: {a1h["direction"]}
-RSI: {a1h["rsi"]:.1f}
-EMA20: {format_price(a1h["ema20"])}
-EMA50: {format_price(a1h["ema50"])}
-EMA200: {format_price(a1h["ema200"])}
-MACD: {a1h["macd"]:.6f}
+Trend: {x1h["trend"]}
+RSI: {x1h["rsi"]:.1f}
 
-4H
-Trend: {a4h["direction"]}
-RSI: {a4h["rsi"]:.1f}
-EMA20: {format_price(a4h["ema20"])}
-EMA50: {format_price(a4h["ema50"])}
-EMA200: {format_price(a4h["ema200"])}
-MACD: {a4h["macd"]:.6f}
+EMA20: {p(x1h["ema20"])}
+EMA50: {p(x1h["ema50"])}
+EMA200: {p(x1h["ema200"])}
+
+MACD: {x1h["macd"]:.6f}
 
 ━━━━━━━━━━━━━━
 
-Support:
-{format_price(result["support"])}
+4 HOUR
 
-Resistance:
-{format_price(result["resistance"])}
+Trend: {x4h["trend"]}
+RSI: {x4h["rsi"]:.1f}
 
+EMA20: {p(x4h["ema20"])}
+EMA50: {p(x4h["ema50"])}
+EMA200: {p(x4h["ema200"])}
+
+MACD: {x4h["macd"]:.6f}
+
+━━━━━━━━━━━━━━
+
+SUPPORT:
+{p(a["support"])}
+
+RESISTANCE:
+{p(a["resistance"])}
+
+BUY SCORE: {a["buy"]}/10
+SELL SCORE: {a["sell"]}/10
 """
 
-    if signal != "WAIT":
+    if a["signal"] != "WAIT":
 
-        message += f"""
+        msg += f"""
+
+━━━━━━━━━━━━━━
+
+TRADE PLAN
+
 ENTRY:
-{format_price(result["entry"])}
+{p(a["entry"])}
 
 STOP LOSS:
-{format_price(result["sl"])}
+{p(a["sl"])}
 
 TP1:
-{format_price(result["tp1"])}
+{p(a["tp1"])}
 
 TP2:
-{format_price(result["tp2"])}
+{p(a["tp2"])}
 
 TP3:
-{format_price(result["tp3"])}
+{p(a["tp3"])}
 
 ━━━━━━━━━━━━━━
 
-WHAT TO DO:
+ACTION
 
-{result["action"]}
+{a["signal"]} yönü daha güçlü görünüyor.
 
-Signal score is a strength score,
-NOT a guaranteed win probability.
+Önce demo hesapta test et.
 
-━━━━━━━━━━━━━━
-
-Risk:
-Demo account recommended.
-Do not risk money you cannot afford to lose.
+Score bir kazanma garantisi değildir.
 """
 
     else:
 
-        message += f"""
+        msg += """
+
 ━━━━━━━━━━━━━━
 
-WHAT TO DO:
+ACTION
 
-{result["action"]}
+🟡 WAIT
 
-BUY score:
-{result["a15"]["bullish"]}
+Şu anda güçlü bir işlem sinyali yok.
 
-SELL score:
-{result["a15"]["bearish"]}
+BUY ve SELL koşulları yeterince
+güçlü şekilde aynı yönde birleşmiyor.
 
-Signal is not strong enough.
-Wait for better alignment.
+İşlem açma.
+Daha iyi hizalanma bekle.
 
 ━━━━━━━━━━━━━━
 
 Demo hesapta test et.
 """
 
-    return message
+    return msg
 
 
 # =========================
-# TELEGRAM GÖNDER
+# TELEGRAM
 # =========================
 
-def send_telegram(message):
+def send_message(text):
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    data = {
-        "chat_id": ALLOWED_CHAT_ID,
-        "text": message
-    }
-
     response = requests.post(
         url,
-        data=data,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text
+        },
         timeout=20
     )
 
@@ -639,107 +568,34 @@ def send_telegram(message):
 
 
 # =========================
-# TELEGRAM KOMUTLARI
-# =========================
-
-def get_updates(offset=None):
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-
-    params = {
-        "timeout": 20
-    }
-
-    if offset is not None:
-        params["offset"] = offset
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
-
-    return response.json()
-
-
-def run_bot():
-
-    offset = None
-
-    while True:
-
-        try:
-
-            data = get_updates(offset)
-
-            if not data.get("ok"):
-                time.sleep(3)
-                continue
-
-            for update in data.get("result", []):
-
-                offset = update["update_id"] + 1
-
-                message = update.get("message")
-
-                if not message:
-                    continue
-
-                chat_id = str(
-                    message["chat"]["id"]
-                )
-
-                text = message.get(
-                    "text",
-                    ""
-                ).strip().lower()
-
-                # SADECE SEN
-                if chat_id != ALLOWED_CHAT_ID:
-                    continue
-
-                if text == "/signal":
-
-                    send_telegram(
-                        "⏳ EUR/USD analiz ediliyor...\n"
-                        "15M + 1H + 4H kontrol ediliyor."
-                    )
-
-                    try:
-
-                        result = generate_signal()
-
-                        message_text = create_message(
-                            result
-                        )
-
-                        send_telegram(
-                            message_text
-                        )
-
-                    except Exception as e:
-
-                        send_telegram(
-                            "❌ Analiz sırasında hata oluştu.\n\n"
-                            f"Hata: {str(e)[:300]}"
-                        )
-
-                elif text == "/start":
-
-                    send_telegram(
-                        "🤖 EUR/USD Advanced Bot aktif.\n\n"
-                        "Komut:\n"
-                        "/signal\n\n"
-                        "EUR/USD için güncel analiz al."
-                    )
-
-        except Exception:
-            time.sleep(5)
-
-
-# =========================
-# BAŞLAT
+# ÇALIŞTIR
 # =========================
 
 if __name__ == "__main__":
-    run_bot()
+
+    try:
+
+        print("EUR/USD Advanced analiz başlıyor...")
+
+        result = create_analysis()
+
+        message = make_message(result)
+
+        send_message(message)
+
+        print("Analiz Telegram'a gönderildi.")
+        print("Bot tamamlandı.")
+
+    except Exception as e:
+
+        print("HATA:", str(e))
+
+        try:
+            send_message(
+                "❌ EUR/USD Advanced Bot hata verdi:\n\n"
+                + str(e)[:500]
+            )
+        except Exception:
+            pass
+
+        raise
